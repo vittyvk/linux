@@ -153,5 +153,18 @@ extern int xen_cpuhp_setup(int (*cpu_up_prepare_cb)(unsigned int),
 
 extern void xen_reboot(int reason);
 extern void xen_emergency_restart(void);
+#ifdef CONFIG_XEN_PV
+extern void xen_pv_pre_suspend(void);
+extern void xen_pv_post_suspend(int suspend_cancelled);
+#else
+static inline void xen_pv_pre_suspend(void) {}
+static inline void xen_pv_post_suspend(int suspend_cancelled) {}
+#endif
+
+#ifdef CONFIG_XEN_PVHVM
+extern void xen_hvm_post_suspend(int suspend_cancelled);
+#else
+static inline void xen_hvm_post_suspend(int suspend_cancelled) {}
+#endif
 
 #endif /* XEN_OPS_H */
