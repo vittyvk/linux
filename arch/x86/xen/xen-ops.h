@@ -148,4 +148,10 @@ __visible void xen_adjust_exception_frame(void);
 
 extern int xen_panic_handler_init(void);
 
+extern int xen_cpuhp_setup(int (*cpu_up_prepare_cb)(unsigned int),
+			   int (*cpu_dead_cb)(unsigned int));
+
+extern void xen_reboot(int reason);
+extern void xen_emergency_restart(void);
+
 #endif /* XEN_OPS_H */
