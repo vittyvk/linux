@@ -1301,6 +1301,108 @@ static u64 kvm_hv_flush_tlb(struct kvm_vcpu *current_vcpu, u64 ingpa,
 		((u64)rep_cnt << HV_HYPERCALL_REP_COMP_OFFSET);
 }
 
+static __always_inline int get_sparse_bank_no(u64 valid_bank_mask, int bank_no)
+{
+	int i = 0, j;
+
+	if (!(valid_bank_mask & BIT_ULL(bank_no)))
+		return -1;
+
+	for (j = 0; j < bank_no; j++)
+		if (valid_bank_mask & BIT_ULL(j))
+			i++;
+
+	return i;
+}
+
+static __always_inline int load_bank_guest(struct kvm *kvm, u64 ingpa,
+				  int sparse_bank, u64 *bank_contents)
+{
+	int offset;
+
+	offset = offsetof(struct hv_tlb_flush_ex, hv_vp_set.bank_contents) +
+		sizeof(u64) * sparse_bank;
+
+	if (unlikely(kvm_read_guest(kvm, ingpa + offset,
+				    bank_contents, sizeof(u64))))
+		return 1;
+
+	return 0;
+}
+
+static int kvm_hv_flush_tlb_ex(struct kvm_vcpu *current_vcpu, u64 ingpa,
+			       u16 rep_cnt)
+{
+	struct kvm *kvm = current_vcpu->kvm;
+	struct kvm_vcpu_hv *hv_current = &current_vcpu->arch.hyperv;
+	struct hv_tlb_flush_ex flush;
+	struct kvm_vcpu *vcpu;
+	u64 bank_contents, valid_bank_mask;
+	int i, cpu, me, current_sparse_bank = -1;
+	u64 ret = HV_STATUS_INVALID_HYPERCALL_INPUT;
+
+	if (unlikely(kvm_read_guest(kvm, ingpa, &flush, sizeof(flush))))
+		return ret;
+
+	valid_bank_mask = flush.hv_vp_set.valid_bank_mask;
+
+	trace_kvm_hv_flush_tlb_ex(valid_bank_mask, flush.hv_vp_set.format,
+				  flush.address_space, flush.flags);
+
+	cpumask_clear(&hv_current->tlb_lush);
+
+	me = get_cpu();
+
+	kvm_for_each_vcpu(i, vcpu, kvm) {
+		struct kvm_vcpu_hv *hv = &vcpu->arch.hyperv;
+		int bank = hv->vp_index / 64, sparse_bank;
+
+		if (flush.hv_vp_set.format == HV_GENERIC_SET_SPARCE_4K) {
+			/* Check is the bank of this vCPU is in sparse set */
+			sparse_bank = get_sparse_bank_no(valid_bank_mask, bank);
+			if (sparse_bank < 0)
+				continue;
+
+			/*
+			 * Assume hv->vp_index is in ascending order and we can
+			 * optimize by not reloading bank contents for every
+			 * vCPU.
+			 */
+			if (sparse_bank != current_sparse_bank) {
+				if (load_bank_guest(kvm, ingpa, sparse_bank,
+						    &bank_contents))
+					return ret;
+				current_sparse_bank = sparse_bank;
+			}
+
+			if (!(bank_contents & BIT_ULL(hv->vp_index % 64)))
+				continue;
+		}
+
+		kvm_make_request(KVM_REQ_TLB_FLUSH, vcpu);
+
+		/*
+		 * It is possible that vCPU will migrate and we will kick wrong
+		 * CPU but vCPU's TLB will anyway be flushed upon migration as
+		 * we already made KVM_REQ_TLB_FLUSH request.
+		 */
+		cpu = vcpu->cpu;
+		if (cpu != -1 && cpu != me && cpu_online(cpu) &&
+		    kvm_arch_vcpu_should_kick(vcpu))
+			cpumask_set_cpu(cpu, &hv_current->tlb_lush);
+	}
+
+	if (!cpumask_empty(&hv_current->tlb_lush))
+		smp_call_function_many(&hv_current->tlb_lush, ack_flush,
+				       NULL, true);
+
+	put_cpu();
+
+	/* We always do full TLB flush, set rep_done = rep_cnt. */
+	return (u64)HV_STATUS_SUCCESS |
+		((u64)rep_cnt << HV_HYPERCALL_REP_COMP_OFFSET);
+}
+
 bool kvm_hv_hypercall_enabled(struct kvm *kvm)
 {
 	return READ_ONCE(kvm->arch.hyperv.hv_hypercall) & HV_X64_MSR_HYPERCALL_ENABLE;
@@ -1449,6 +1551,20 @@ int kvm_hv_hypercall(struct kvm_vcpu *vcpu)
 			break;
 		}
 		ret = kvm_hv_flush_tlb(vcpu, ingpa, rep_cnt);
+		break;
+	case HVCALL_FLUSH_VIRTUAL_ADDRESS_LIST_EX:
+		if (unlikely(fast || !rep_cnt || rep_idx)) {
+			ret = HV_STATUS_INVALID_HYPERCALL_INPUT;
+			break;
+		}
+		ret = kvm_hv_flush_tlb_ex(vcpu, ingpa, rep_cnt);
+		break;
+	case HVCALL_FLUSH_VIRTUAL_ADDRESS_SPACE_EX:
+		if (unlikely(fast || rep)) {
+			ret = HV_STATUS_INVALID_HYPERCALL_INPUT;
+			break;
+		}
+		ret = kvm_hv_flush_tlb_ex(vcpu, ingpa, rep_cnt);
 		break;
 	default:
 		ret = HV_STATUS_INVALID_HYPERCALL_CODE;
