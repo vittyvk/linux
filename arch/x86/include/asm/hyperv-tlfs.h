@@ -301,6 +301,7 @@ struct ms_hyperv_tsc_page {
 #define HV_X64_MSR_REENLIGHTENMENT_CONTROL	0x40000106
 
 /* Nested features (CPUID 0x4000000A) EAX */
+#define HV_X64_NESTED_DIRECT_FLUSH		BIT(17)
 #define HV_X64_NESTED_MSR_BITMAP		BIT(19)
 
 struct hv_reenlightenment_control {
@@ -729,5 +730,10 @@ struct hv_tlb_flush_ex {
 	} hv_vp_set;
 	u64 gva_list[];
 };
+
+struct hv_partition_assist_pg {
+	u32 tlb_lock_count;
+};
+
 
 #endif

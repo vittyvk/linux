@@ -4204,7 +4204,8 @@ static struct vmcs *alloc_vmcs(void)
 	return alloc_vmcs_cpu(raw_smp_processor_id());
 }
 
-static int alloc_loaded_vmcs(struct loaded_vmcs *loaded_vmcs)
+static int alloc_loaded_vmcs(struct kvm_vcpu *vcpu,
+			     struct loaded_vmcs *loaded_vmcs)
 {
 	loaded_vmcs->vmcs = alloc_vmcs();
 	if (!loaded_vmcs->vmcs)
@@ -4225,6 +4226,23 @@ static int alloc_loaded_vmcs(struct loaded_vmcs *loaded_vmcs)
 				(struct hv_enlightened_vmcs *)loaded_vmcs->vmcs;
 
 			evmcs->hv_enlightenments_control.msr_bitmap = 1;
+		}
+
+		/*
+		 * Partition assist page is allocated only when we use
+		 * Enlightened VMCS and Direct TLB flush is supported.
+		 */
+		if (vcpu->kvm->hv_pa_pg) {
+			struct hv_enlightened_vmcs *evmcs =
+				(struct hv_enlightened_vmcs *)loaded_vmcs->vmcs;
+
+			evmcs->partition_assist_page =
+				__pa(vcpu->kvm->hv_pa_pg);
+			evmcs->hv_vm_id = (u64)vcpu->kvm;
+			evmcs->hv_enlightenments_control.
+				nested_flush_hypercall= 1;
+
+			printk("KVM: Hyper-V: enabled DIRECT flush for %lx\n", (u64)vcpu->kvm);
 		}
 	}
 	return 0;
@@ -7623,7 +7641,7 @@ static int enter_vmx_operation(struct kvm_vcpu *vcpu)
 	struct vmcs *shadow_vmcs;
 	int r;
 
-	r = alloc_loaded_vmcs(&vmx->nested.vmcs02);
+	r = alloc_loaded_vmcs(vcpu, &vmx->nested.vmcs02);
 	if (r < 0)
 		goto out_vmcs02;
 
@@ -9753,6 +9771,10 @@ static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
 	evmcs_rsp = static_branch_unlikely(&enable_evmcs) ?
 		(unsigned long)&current_evmcs->host_rsp : 0;
 
+	/* Optimizable */
+	if (static_branch_unlikely(&enable_evmcs))
+		current_evmcs->hv_vp_id = vcpu->arch.hyperv.vp_index;
+
 	asm(
 		/* Store host registers */
 		"push %%" _ASM_DX "; push %%" _ASM_BP ";"
@@ -9960,11 +9982,20 @@ STACK_FRAME_NON_STANDARD(vmx_vcpu_run);
 static struct kvm *vmx_vm_alloc(void)
 {
 	struct kvm_vmx *kvm_vmx = kzalloc(sizeof(struct kvm_vmx), GFP_KERNEL);
+
+	if (static_branch_unlikely(&enable_evmcs) &&
+	    (ms_hyperv.nested_features & HV_X64_NESTED_DIRECT_FLUSH)) {
+		kvm_vmx->kvm.hv_pa_pg = kzalloc(PAGE_SIZE, GFP_KERNEL);
+		printk("KVM: Hyper-V: allocated PA_PG for %lx: %lx\n", (u64)&kvm_vmx->kvm, kvm_vmx->kvm.hv_pa_pg);
+	}
+
 	return &kvm_vmx->kvm;
 }
 
 static void vmx_vm_free(struct kvm *kvm)
 {
+	if (static_branch_unlikely(&enable_evmcs))
+		kfree(kvm->hv_pa_pg);
 	kfree(to_kvm_vmx(kvm));
 }
 
@@ -10049,7 +10080,7 @@ static struct kvm_vcpu *vmx_create_vcpu(struct kvm *kvm, unsigned int id)
 	if (!vmx->guest_msrs)
 		goto free_pml;
 
-	err = alloc_loaded_vmcs(&vmx->vmcs01);
+	err = alloc_loaded_vmcs(&vmx->vcpu, &vmx->vmcs01);
 	if (err < 0)
 		goto free_msrs;
 

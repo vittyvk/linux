@@ -446,6 +446,7 @@ struct kvm {
 	struct srcu_struct srcu;
 	struct srcu_struct irq_srcu;
 	pid_t userspace_pid;
+	struct hv_partition_assist_pg *hv_pa_pg;
 };
 
 #define kvm_err(fmt, ...) \
